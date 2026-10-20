@@ -138,11 +138,13 @@ def test_a_challenge_appends_and_never_overwrites(deployed):
             case_id, "TEXT_STATEMENT", "New photo of the boxed, unused unit."
         )
 
-    # The re-evaluation sees the new evidence and cites it.
+    # The re-evaluation sees the new evidence and cites it. The model cites the
+    # content derived id of the prompt, the contract maps it back onto the
+    # stored evidence record.
     dep.vm.clear_mocks()
     dep.mock_llm(
         LLM_PROMPT_PATTERN,
-        llm_reply(verdict="ELIGIBLE_FULL", evidence=["EV-2"], reasoning="second"),
+        llm_reply(verdict="ELIGIBLE_FULL", evidence=["E1"], reasoning="second"),
     )
     with dep.as_stranger():
         dep.contract.re_evaluate(case_id)
@@ -154,6 +156,7 @@ def test_a_challenge_appends_and_never_overwrites(deployed):
     assert history[1]["produced_by"] == "RE_EVALUATION"
     assert history[1]["round"] == 2
     assert history[1]["reasoning_digest"] == "second"
+    # "E1" is the new photo of the buyer, which is the third stored record.
     assert "EV-2" in history[1]["cited_evidence_ids"]
 
 

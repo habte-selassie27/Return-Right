@@ -95,30 +95,31 @@ def test_only_the_parties_may_submit_evidence(deployed):
             dep.contract.submit_evidence(case_id, "TEXT_STATEMENT", "hi")
 
 
-def test_only_the_buyer_or_the_owner_may_request_a_seller_response(deployed):
+def test_the_seller_response_window_may_be_opened_by_anyone(deployed):
     dep = deployed
     policy_id = dep.register_policy()
     order_id = dep.record_order(policy_id)
     case_id = dep.open_case(order_id)
 
-    with dep.as_merchant():
-        with dep.vm.expect_revert("EXPECTED: caller is not authorized"):
-            dep.contract.request_seller_response(case_id)
-
+    # Opening the window is permissionless: the assessment needs the window to
+    # be closed, so nobody may stall a case by refusing to invite the seller.
+    # Opening it cannot shorten it either, so no side is favoured.
     with dep.as_stranger():
-        with dep.vm.expect_revert("EXPECTED: caller is not authorized"):
-            dep.contract.request_seller_response(case_id)
-
-    with dep.as_owner():
         dep.contract.request_seller_response(case_id)
     assert dep.contract.get_case_status(case_id) == "AWAITING_SELLER"
+
+    # The window can only be opened once.
+    with dep.as_buyer():
+        with dep.vm.expect_revert("EXPECTED: invalid state transition"):
+            dep.contract.request_seller_response(case_id)
 
 
 def test_permissionless_methods_accept_any_caller(deployed):
     dep = deployed
-    policy_id = dep.register_policy()
+    policy_id = dep.register_policy(required=[])
     order_id = dep.record_order(policy_id)
     case_id = dep.open_case(order_id)
+    dep.ready_case(case_id)
 
     # evaluation, window closing and finalization are permissionless so that
     # nobody can stall a case by refusing to act.

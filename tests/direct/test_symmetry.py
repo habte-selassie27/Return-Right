@@ -98,6 +98,33 @@ def test_the_prompt_uses_neutral_labels_and_a_stable_order(deployed):
     assert sides == {"A", "B"}
 
 
+def test_the_prompt_never_shows_a_stored_evidence_id(deployed):
+    dep = deployed
+    policy_id = dep.register_policy(required=[], clauses=[CLAUSE])
+    order_id = dep.record_order(policy_id)
+    case_id = dep.open_case(order_id)
+
+    with dep.as_buyer():
+        dep.contract.submit_evidence(case_id, "TEXT_STATEMENT", "alpha statement")
+        dep.contract.request_seller_response(case_id)
+    with dep.as_merchant():
+        dep.contract.submit_evidence(case_id, "TEXT_STATEMENT", "beta statement")
+        dep.contract.close_response_window(case_id)
+
+    captured = dep.capture_prompts(llm_reply(verdict="INCONCLUSIVE"))
+    with dep.as_stranger():
+        dep.contract.evaluate_case(case_id)
+
+    prompt = captured[0]
+    # The stored ids are assigned in submission order, so they must not reach
+    # the model: the prompt uses the content derived ids instead.
+    assert "EV-0" not in prompt
+    assert "EV-1" not in prompt
+    for line in prompt.splitlines():
+        if "<evidence " in line:
+            assert EVIDENCE_LINE.search(line).group(1).startswith("E")
+
+
 def test_the_order_of_the_evidence_in_the_prompt_does_not_depend_on_submission_order(
     deployed,
 ):
@@ -122,6 +149,11 @@ def test_the_order_of_the_evidence_in_the_prompt_does_not_depend_on_submission_o
         for line in captured_one[0].splitlines()
         if "<evidence " in line
     ]
+    ids_one = [
+        EVIDENCE_LINE.search(line).group(1)
+        for line in captured_one[0].splitlines()
+        if "<evidence " in line
+    ]
 
     # Second case: the same two statements, submitted in the opposite order.
     order_id_two = dep.record_order(policy_id)
@@ -143,9 +175,16 @@ def test_the_order_of_the_evidence_in_the_prompt_does_not_depend_on_submission_o
         for line in captured_two[0].splitlines()
         if "<evidence " in line
     ]
+    ids_two = [
+        EVIDENCE_LINE.search(line).group(1)
+        for line in captured_two[0].splitlines()
+        if "<evidence " in line
+    ]
 
-    # The very same statements reach the model in the very same order.
+    # The very same statements reach the model in the very same order, under
+    # the very same content derived ids.
     assert order_one == order_two
+    assert ids_one == ids_two
 
 
 def test_both_sides_have_the_same_evidence_cap(deployed):
@@ -196,6 +235,7 @@ def test_both_sides_have_the_same_challenge_rights(deployed):
     policy_id = dep.register_policy(required=[], clauses=[CLAUSE])
     order_id = dep.record_order(policy_id)
     case_id = dep.open_case(order_id)
+    dep.ready_case(case_id)
     dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="NOT_ELIGIBLE"))
     with dep.as_stranger():
         dep.contract.evaluate_case(case_id)

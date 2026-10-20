@@ -39,6 +39,7 @@ def test_update_policy_creates_version_2(deployed):
                     "text": "Item must be unused.",
                     "kind": "DETERMINISTIC",
                     "topic": "CONDITION",
+                    "rule": "RETURN_WINDOW",
                 }
             ],
         )
@@ -198,6 +199,23 @@ def test_merchant_cannot_manage_another_merchants_policy(deployed):
             dep.contract.deprecate_policy(policy_id)
 
 
+def test_a_merchant_cannot_register_an_unbounded_number_of_policies(deployed):
+    dep = deployed
+    clause = {
+        "clause_id": "C1",
+        "text": "text",
+        "kind": "INTERPRETIVE",
+        "topic": "OTHER",
+    }
+    with dep.as_merchant():
+        for _ in range(64):
+            dep.contract.register_policy("t", 100, [], [], 0, [clause])
+
+    with dep.as_merchant():
+        with dep.vm.expect_revert("EXPECTED: too many policies for this merchant"):
+            dep.contract.register_policy("t", 100, [], [], 0, [clause])
+
+
 def test_unknown_policy_is_rejected(deployed):
     dep = deployed
     with dep.as_merchant():
@@ -215,3 +233,136 @@ def test_unknown_policy_is_rejected(deployed):
                 0,
                 [{"clause_id": "C1", "text": "x", "kind": "DETERMINISTIC"}],
             )
+
+
+def test_a_deterministic_clause_must_bind_to_an_enforced_rule(deployed):
+    dep = deployed
+    # A clause that claims to be deterministic but names no rule would never be
+    # enforced by the code, so it is rejected instead of silently ignored.
+    with dep.as_merchant():
+        with dep.vm.expect_revert("EXPECTED: unsupported deterministic clause"):
+            dep.contract.register_policy(
+                "t",
+                100,
+                [],
+                [],
+                0,
+                [
+                    {
+                        "clause_id": "C1",
+                        "text": "The item must be blue.",
+                        "kind": "DETERMINISTIC",
+                        "topic": "OTHER",
+                    }
+                ],
+            )
+
+    with dep.as_merchant():
+        with dep.vm.expect_revert("EXPECTED: unsupported deterministic clause"):
+            dep.contract.register_policy(
+                "t",
+                100,
+                [],
+                [],
+                0,
+                [
+                    {
+                        "clause_id": "C1",
+                        "text": "x",
+                        "kind": "DETERMINISTIC",
+                        "topic": "OTHER",
+                        "rule": "BLUE_ITEM",
+                    }
+                ],
+            )
+
+
+def test_an_interpretive_clause_may_not_declare_a_rule(deployed):
+    dep = deployed
+    with dep.as_merchant():
+        with dep.vm.expect_revert(
+            "EXPECTED: interpretive clause cannot declare a rule"
+        ):
+            dep.contract.register_policy(
+                "t",
+                100,
+                [],
+                [],
+                0,
+                [
+                    {
+                        "clause_id": "C1",
+                        "text": "x",
+                        "kind": "INTERPRETIVE",
+                        "topic": "OTHER",
+                        "rule": "RETURN_WINDOW",
+                    }
+                ],
+            )
+
+
+def test_duplicate_clause_ids_are_rejected(deployed):
+    dep = deployed
+    with dep.as_merchant():
+        with dep.vm.expect_revert("EXPECTED: duplicate clause id"):
+            dep.contract.register_policy(
+                "t",
+                100,
+                [],
+                [],
+                0,
+                [
+                    {
+                        "clause_id": "C1",
+                        "text": "first",
+                        "kind": "INTERPRETIVE",
+                        "topic": "OTHER",
+                    },
+                    {
+                        "clause_id": "C1",
+                        "text": "second",
+                        "kind": "INTERPRETIVE",
+                        "topic": "OTHER",
+                    },
+                ],
+            )
+
+
+def test_ambiguous_policy_lists_are_rejected(deployed):
+    dep = deployed
+    clause = {
+        "clause_id": "C1",
+        "text": "x",
+        "kind": "INTERPRETIVE",
+        "topic": "OTHER",
+    }
+    with dep.as_merchant():
+        with dep.vm.expect_revert("EXPECTED: duplicate required evidence kind"):
+            dep.contract.register_policy(
+                "t", 100, [], ["TEXT_STATEMENT", "TEXT_STATEMENT"], 0, [clause]
+            )
+
+    with dep.as_merchant():
+        with dep.vm.expect_revert("EXPECTED: duplicate excluded category"):
+            dep.contract.register_policy(
+                "t", 100, ["TOYS", "TOYS"], [], 0, [clause]
+            )
+
+
+def test_the_clause_rule_is_part_of_the_stored_policy(deployed):
+    dep = deployed
+    policy_id = dep.register_policy(
+        required=[],
+        clauses=[
+            {
+                "clause_id": "C1",
+                "text": "The request must be inside the return window.",
+                "kind": "DETERMINISTIC",
+                "topic": "WINDOW",
+                "rule": "RETURN_WINDOW",
+            }
+        ],
+    )
+    clause = dep.contract.get_policy(policy_id)["clauses"][0]
+    assert clause["rule"] == "RETURN_WINDOW"
+    assert clause["kind"] == "DETERMINISTIC"

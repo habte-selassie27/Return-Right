@@ -25,6 +25,16 @@ CONTRACT_MODULE_NAME = "_contract_" + CONTRACT_PATH.stem
 # The prompt always starts with this sentence, so it is a stable mock key.
 LLM_PROMPT_PATTERN = "impartial adjudicator"
 
+# A clause that the code really enforces. A DETERMINISTIC clause must bind to
+# one of the rules the contract implements.
+DETERMINISTIC_CLAUSE = {
+    "clause_id": "C1",
+    "text": "Returns are accepted when the buyer provides a proof of purchase.",
+    "kind": "DETERMINISTIC",
+    "topic": "PROOF",
+    "rule": "REQUIRED_EVIDENCE",
+}
+
 # The transaction time every test starts from. The default delivery timestamp of
 # the fixtures is one day earlier, so a fresh case is inside the return window.
 DEFAULT_NOW = "2026-01-02T00:00:00Z"
@@ -171,6 +181,35 @@ class Deployment:
             return self.contract.register_policy(
                 title, window, excluded, required, max_fee, clauses
             )
+
+    def request_seller_response(self, case_id: str) -> None:
+        """Open the seller response window (permissionless in the contract)."""
+        with self.as_buyer():
+            self.contract.request_seller_response(case_id)
+
+    def close_seller_window(self, case_id: str, by_merchant: bool = True) -> None:
+        """Close the seller response window, which makes the case ready."""
+        if by_merchant:
+            with self.as_merchant():
+                self.contract.close_response_window(case_id)
+        else:
+            with self.as_stranger():
+                self.contract.close_response_window(case_id)
+
+    def ready_case(self, case_id: str, seller_evidence=None) -> str:
+        """Take a case to READY: the seller window opened and closed.
+
+        A case may only be assessed once the response window is closed, so
+        almost every test needs this step.
+        """
+        self.request_seller_response(case_id)
+        if seller_evidence is not None:
+            with self.as_merchant():
+                self.contract.submit_evidence(
+                    case_id, "TEXT_STATEMENT", seller_evidence
+                )
+        self.close_seller_window(case_id)
+        return case_id
 
     def record_order(
         self,

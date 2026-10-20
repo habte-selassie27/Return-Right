@@ -38,6 +38,7 @@ def test_order_stays_pinned_when_the_policy_is_updated(deployed):
                     "text": "Item must be unused.",
                     "kind": "DETERMINISTIC",
                     "topic": "CONDITION",
+                    "rule": "RETURN_WINDOW",
                 }
             ],
         )
