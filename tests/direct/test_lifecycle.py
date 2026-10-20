@@ -226,3 +226,81 @@ def test_a_withdrawn_case_never_reaches_an_assessment(deployed):
         with dep.vm.expect_revert("EXPECTED: invalid state transition"):
             dep.contract.evaluate_case(case_id)
     assert dep.contract.get_assessment_history(case_id) == []
+
+
+def test_the_response_window_can_be_closed_at_the_exact_deadline(deployed):
+    dep = deployed
+    case_id = _open(dep)
+    dep.request_seller_response(case_id)
+
+    # One second before the deadline the window is still open.
+    dep.warp("2026-01-04T23:59:59Z")
+    with dep.as_stranger():
+        with dep.vm.expect_revert("EXPECTED: response window is still open"):
+            dep.contract.close_response_window(case_id)
+
+    # At the deadline it is over.
+    dep.warp("2026-01-05T00:00:00Z")
+    with dep.as_stranger():
+        dep.contract.close_response_window(case_id)
+    assert dep.contract.get_case_status(case_id) == "READY"
+
+
+def test_a_late_invitation_is_rejected(deployed):
+    dep = deployed
+    case_id = _open(dep)
+
+    # The invitation deadline is the initial evidence deadline, so the seller
+    # can never be handed a window that starts after the case was stale.
+    dep.warp("2026-01-05T00:00:01Z")
+    with dep.as_stranger():
+        with dep.vm.expect_revert("EXPECTED: invitation window closed"):
+            dep.contract.request_seller_response(case_id)
+
+
+def test_a_case_that_was_never_invited_can_be_closed_after_the_deadline(deployed):
+    dep = deployed
+    case_id = _open(dep)
+
+    # Before the deadline nobody may close it: the seller still has to be
+    # invited.
+    with dep.as_stranger():
+        with dep.vm.expect_revert("EXPECTED: response window is still open"):
+            dep.contract.close_response_window(case_id)
+
+    dep.warp("2026-01-05T00:00:01Z")
+    with dep.as_stranger():
+        dep.contract.close_response_window(case_id)
+    assert dep.contract.get_case_status(case_id) == "READY"
+
+    # The seller was never invited, so the case says so.
+    dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="INCONCLUSIVE"))
+    with dep.as_stranger():
+        dep.contract.evaluate_case(case_id)
+    assert "SELLER_NO_RESPONSE" in dep.contract.get_assessment_history(case_id)[0]["flags"]
+
+
+def test_evidence_is_refused_after_an_assessment_without_a_challenge(deployed):
+    dep = deployed
+    policy_id = dep.register_policy(required=[], clauses=[CLAUSE])
+    order_id = dep.record_order(policy_id)
+    case_id = dep.open_case(order_id)
+    dep.ready_case(case_id)
+    dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="INCONCLUSIVE"))
+    with dep.as_stranger():
+        dep.contract.evaluate_case(case_id)
+
+    # Evidence that is never weighed would be pointless, so it is refused
+    # until a challenge is pending.
+    for actor in ("buyer", "merchant"):
+        with getattr(dep, "as_%s" % actor)():
+            with dep.vm.expect_revert("EXPECTED: evidence window closed"):
+                dep.contract.submit_evidence(case_id, "TEXT_STATEMENT", "too late")
+
+    # With a pending challenge both sides may add their proof again.
+    with dep.as_buyer():
+        dep.contract.challenge_assessment(case_id, CHALLENGE_REASON)
+    with dep.as_buyer():
+        dep.contract.submit_evidence(case_id, "TEXT_STATEMENT", "the new photo")
+    with dep.as_merchant():
+        dep.contract.submit_evidence(case_id, "TEXT_STATEMENT", "the counter photo")

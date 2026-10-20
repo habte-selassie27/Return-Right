@@ -1,4 +1,8 @@
-"""Call B: the structured claims extracted from linked evidence."""
+"""Call B: the text signals extracted from linked evidence.
+
+The signals are what a page SAYS. The contract cannot authenticate a page, so
+every signal is unverified and the assessment says so.
+"""
 
 from tests.conftest import LLM_PROMPT_PATTERN, llm_reply
 
@@ -22,7 +26,7 @@ def _case_with_tracking_evidence(dep, url=TRACKING_URL):
     return case_id
 
 
-def test_tracking_claims_are_extracted_and_passed_to_the_model(deployed):
+def test_tracking_signals_are_extracted_and_passed_to_the_model(deployed):
     dep = deployed
     case_id = _case_with_tracking_evidence(dep)
     dep.mock_web("carrier.example/track", 200, "Status: Delivered on 2026-01-05")
@@ -32,13 +36,32 @@ def test_tracking_claims_are_extracted_and_passed_to_the_model(deployed):
         dep.contract.evaluate_case(case_id)
 
     prompt = captured[0]
-    assert 'delivery_claim="delivered"' in prompt
-    assert 'delivery_day_claim="2026-01-05"' in prompt
+    assert 'delivery_signal="delivered_word"' in prompt
+    assert 'delivery_date_near_signal="2026-01-05"' in prompt
     assert 'reachable="yes"' in prompt
-    # The contract cannot authenticate the page, so the claim is unverified.
+    # The contract cannot authenticate the page, so the signal is unverified.
     assert 'source_trust="UNVERIFIED"' in prompt
     # The inspected page is fingerprinted for the audit trail.
     assert "content_digest=" in prompt
+    # And the prompt says what the signals are.
+    assert "TEXT SIGNALS" in prompt
+
+
+def test_a_date_that_is_far_from_the_signal_is_not_reported(deployed):
+    dep = deployed
+    case_id = _case_with_tracking_evidence(dep)
+    # The date belongs to something else on the page, not to the delivery.
+    dep.mock_web(
+        "carrier.example/track",
+        200,
+        "Order 2026-01-05 placed. Status: delivered without a date.",
+    )
+
+    captured = dep.capture_prompts(llm_reply(verdict="ELIGIBLE_FULL"))
+    with dep.as_stranger():
+        dep.contract.evaluate_case(case_id)
+
+    assert 'delivery_date_near_signal="unknown"' in captured[0]
 
 
 def test_an_unreachable_source_is_flagged_instead_of_deciding_the_case(deployed):
@@ -65,14 +88,15 @@ def test_a_changed_source_makes_the_validators_disagree(deployed):
     with dep.as_stranger():
         dep.contract.evaluate_case(case_id)
 
-    # The first captured block is the web facts, the second one the interpretation.
+    # The first captured block is the page signals, the second one the
+    # interpretation.
     validators = dep.vm._captured_validators
     assert len(validators) == 2
     facts_index = 0
     stored_facts = validators[facts_index][0]
-    # The facts are keyed by the content derived evidence id, never by the
+    # The signals are keyed by the content derived evidence id, never by the
     # stored id, so the submission order cannot leak into the prompt.
-    assert stored_facts["E1"]["delivery_claim"] == "delivered"
+    assert stored_facts["E1"]["delivery_signal"] == "delivered_word"
 
     # The same source now says something else: the validators must disagree.
     dep.vm.clear_mocks()
@@ -104,6 +128,9 @@ def test_a_photo_url_is_only_checked_for_reachability(deployed):
     prompt = captured[0]
     # The contract never claims to have looked inside the image.
     assert 'content="not_analyzed"' in prompt
-    assert "EVIDENCE_UNAVAILABLE" not in dep.contract.get_assessment_history(case_id)[0]["flags"]
-    # A reachable source is still only an unverified claim.
+    assert (
+        "EVIDENCE_UNAVAILABLE"
+        not in dep.contract.get_assessment_history(case_id)[0]["flags"]
+    )
+    # A reachable source is still only an unverified signal.
     assert "EVIDENCE_UNVERIFIED" in dep.contract.get_assessment_history(case_id)[0]["flags"]

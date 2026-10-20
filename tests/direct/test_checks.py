@@ -100,7 +100,9 @@ def test_missing_required_evidence_cannot_yield_a_full_refund(deployed):
     dep.ready_case(case_id)
 
     # The model claims a full refund although the required photo is missing.
-    dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="ELIGIBLE_FULL"))
+    dep.mock_llm(
+        LLM_PROMPT_PATTERN, llm_reply(verdict="ELIGIBLE_FULL", evidence=[])
+    )
     with dep.as_stranger():
         with dep.vm.expect_revert(
             "LLM_ERROR: verdict inconsistent with deterministic checks"
@@ -119,7 +121,7 @@ def test_missing_required_evidence_cannot_yield_a_rejection_either(deployed):
 
     # A missing document is not a finding against the buyer, so the model may
     # not reject the request either: the case stays open.
-    dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="NOT_ELIGIBLE"))
+    dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="NOT_ELIGIBLE", evidence=[]))
     with dep.as_stranger():
         with dep.vm.expect_revert(
             "LLM_ERROR: verdict inconsistent with deterministic checks"
@@ -171,6 +173,8 @@ def test_fee_within_the_policy_max_is_accepted(deployed):
     )
     order_id = dep.record_order(policy_id)
     case_id = dep.open_case(order_id)
+    with dep.as_buyer():
+        dep.contract.submit_evidence(case_id, "TEXT_STATEMENT", "the unit is unused")
     dep.ready_case(case_id)
 
     dep.mock_llm(

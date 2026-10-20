@@ -48,14 +48,24 @@ def llm_reply(
     evidence=None,
     reasoning="The buyer's evidence satisfies the policy.",
 ):
-    """Build a model reply that satisfies the prompt contract."""
+    """Build a model reply that satisfies the prompt contract.
+
+    An eligible verdict has to cite the evidence it rests on, so the default
+    cites the first content derived id of the canonical order. A test for a
+    case without evidence has to pass `evidence=[]`.
+    """
+    if evidence is None:
+        if verdict in ("NOT_ELIGIBLE", "INCONCLUSIVE"):
+            evidence = []
+        else:
+            evidence = ["E1"]
     return json.dumps(
         {
             "verdict": verdict,
             "confidence_band": confidence,
             "fee_bps": fee_bps,
             "cited_clause_ids": ["C1"] if clauses is None else clauses,
-            "cited_evidence_ids": [] if evidence is None else evidence,
+            "cited_evidence_ids": evidence,
             "reasoning_digest": reasoning,
         }
     )

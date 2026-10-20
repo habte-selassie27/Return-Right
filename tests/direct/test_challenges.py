@@ -230,3 +230,89 @@ def test_escalation_role_can_escalate(deployed):
     with dep.as_stranger():
         dep.contract.escalate_case(case_id, "needs a human")
     assert dep.contract.get_case_status(case_id) == "ESCALATED"
+
+
+def test_a_challenge_without_new_evidence_is_possible(deployed):
+    """A challenge may rest on a stated factual error, not only on new proof."""
+    dep = deployed
+    case_id = _ready_case(dep)
+    dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="NOT_ELIGIBLE"))
+    with dep.as_stranger():
+        dep.contract.evaluate_case(case_id)
+
+    with dep.as_buyer():
+        dep.contract.challenge_assessment(
+            case_id, "The assessment ignores the statement of the courier."
+        )
+
+    # The re-evaluation sees the same evidence, and the history grows.
+    dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="INCONCLUSIVE"))
+    with dep.as_stranger():
+        dep.contract.re_evaluate(case_id)
+
+    history = dep.contract.get_assessment_history(case_id)
+    assert len(history) == 2
+    assert history[1]["produced_by"] == "RE_EVALUATION"
+    assert history[1]["evidence_count"] == 2
+
+
+def test_duplicate_evidence_is_kept_but_counted_once(deployed):
+    dep = deployed
+    case_id = _ready_case(dep)
+    dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="NOT_ELIGIBLE"))
+    with dep.as_stranger():
+        dep.contract.evaluate_case(case_id)
+    with dep.as_buyer():
+        dep.contract.challenge_assessment(case_id, CHALLENGE_REASON)
+    with dep.as_buyer():
+        dep.contract.submit_evidence(case_id, "TEXT_STATEMENT", "the same statement")
+    with dep.as_buyer():
+        dep.contract.submit_evidence(case_id, "TEXT_STATEMENT", "the same statement")
+
+    items = dep.contract.get_evidence(case_id)
+    # Both records exist, they are append only, and each one counts.
+    assert len(items) == 4
+    assert items[-1]["ref"] == items[-2]["ref"]
+    assert items[-1]["evidence_id"] != items[-2]["evidence_id"]
+
+    # The re-evaluation has to take the new evidence into account, so the
+    # model cites it: E2 is the first of the two new statements in the
+    # canonical order.
+    dep.vm.clear_mocks()
+    dep.mock_llm(
+        LLM_PROMPT_PATTERN, llm_reply(verdict="INCONCLUSIVE", evidence=["E2"])
+    )
+    with dep.as_stranger():
+        dep.contract.re_evaluate(case_id)
+    assert dep.contract.get_assessment_history(case_id)[1]["evidence_count"] == 4
+
+
+def test_the_citations_of_a_re_evaluation_map_back_onto_the_stored_records(deployed):
+    dep = deployed
+    case_id = _ready_case(dep)
+    dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="NOT_ELIGIBLE"))
+    with dep.as_stranger():
+        dep.contract.evaluate_case(case_id)
+
+    with dep.as_buyer():
+        dep.contract.challenge_assessment(case_id, CHALLENGE_REASON)
+    with dep.as_buyer():
+        dep.contract.submit_evidence(
+            case_id, "TEXT_STATEMENT", "New photo of the boxed, unused unit."
+        )
+
+    # The model cites the content derived id of the new photo.
+    dep.vm.clear_mocks()
+    dep.mock_llm(
+        LLM_PROMPT_PATTERN,
+        llm_reply(verdict="ELIGIBLE_FULL", evidence=["E1"], reasoning="second"),
+    )
+    with dep.as_stranger():
+        dep.contract.re_evaluate(case_id)
+
+    history = dep.contract.get_assessment_history(case_id)
+    cited = history[1]["cited_evidence_ids"]
+    assert len(cited) == 1
+    stored = {item["evidence_id"]: item["ref"] for item in dep.contract.get_evidence(case_id)}
+    # The citation points at the stored record of the new photo.
+    assert stored[cited[0]] == "New photo of the boxed, unused unit."

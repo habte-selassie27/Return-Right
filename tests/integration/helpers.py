@@ -51,7 +51,12 @@ def write(client, address, method, account, args=None, kwargs=None):
 def call_result(receipt):
     """The return value of a write transaction."""
     result = receipt["consensus_data"]["leader_receipt"][0]["result"]
-    readable = result.get("payload", {}).get("readable")
+    payload = result.get("payload") if isinstance(result, dict) else None
+    if isinstance(payload, str):
+        # A scalar return value (for example a version number) comes back as
+        # its readable text.
+        return payload
+    readable = payload.get("readable") if isinstance(payload, dict) else None
     if readable is None:
         return None
     try:
@@ -161,12 +166,29 @@ def open_case(
     return call_result(receipt)
 
 
-def ready_case(client, address, merchant, buyer, case_id, seller_claim=None):
+def ready_case(
+    client,
+    address,
+    merchant,
+    buyer,
+    case_id,
+    seller_claim=None,
+    buyer_claim="The unit arrived defective and does not power on.",
+):
     """Take a case to READY: the seller window is opened and closed.
 
     A case may only be assessed once the response window is closed, so every
-    evaluation has to go through this step.
+    evaluation has to go through this step. The buyer submits a statement
+    first, because an eligible verdict has to rest on cited evidence.
     """
+    if buyer_claim is not None:
+        write(
+            client,
+            address,
+            "submit_evidence",
+            buyer,
+            [case_id, "TEXT_STATEMENT", buyer_claim],
+        )
     write(client, address, "request_seller_response", buyer, [case_id])
     if seller_claim is not None:
         write(

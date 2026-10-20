@@ -53,6 +53,9 @@ def test_a_contested_delivery_date_is_not_a_hard_failure(deployed):
 
     with dep.as_buyer():
         dep.contract.contest_order_record(case_id, ["DELIVERY_DATE"])
+        dep.contract.submit_evidence(
+            case_id, "TEXT_STATEMENT", "the courier delivered it on 2025-12-28"
+        )
     dep.ready_case(case_id)
 
     dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="ELIGIBLE_FULL"))
@@ -126,6 +129,9 @@ def test_a_contested_record_without_an_interpretive_clause_stays_open(deployed):
 
     with dep.as_buyer():
         dep.contract.contest_order_record(case_id, ["DELIVERY_DATE"])
+        dep.contract.submit_evidence(
+            case_id, "TEXT_STATEMENT", "the courier delivered it on 2025-12-28"
+        )
     dep.ready_case(case_id)
 
     dep.mock_llm(LLM_PROMPT_PATTERN, llm_reply(verdict="ELIGIBLE_FULL"))

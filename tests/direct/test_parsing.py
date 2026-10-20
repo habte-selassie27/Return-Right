@@ -7,7 +7,7 @@ import pytest
 from tests.conftest import llm_reply
 
 CLAUSES = ["C1", "C2"]
-EVIDENCE = ["EV-0", "EV-1"]
+EVIDENCE = ["E1", "E2"]
 MAX_FEE = 1500
 
 
@@ -21,7 +21,8 @@ def test_valid_json_is_parsed(contract_module):
     assert payload["confidence_band"] == "MEDIUM"
     assert payload["fee_bps"] == 500
     assert payload["cited_clause_ids"] == ["C1"]
-    assert payload["cited_evidence_ids"] == []
+    # An eligible verdict cites the evidence it rests on.
+    assert payload["cited_evidence_ids"] == ["E1"]
 
 
 def test_json_in_a_markdown_fence_is_parsed(contract_module):
@@ -59,7 +60,7 @@ def test_documented_aliases_are_accepted(contract_module):
             "confidence": "LOW",
             "fee": 0,
             "clauses": ["C1"],
-            "evidence": ["EV-0"],
+            "evidence": ["E1"],
             "rationale": "nothing proves the claim",
         }
     )
@@ -67,7 +68,7 @@ def test_documented_aliases_are_accepted(contract_module):
     assert payload["verdict"] == "NOT_ELIGIBLE"
     assert payload["confidence_band"] == "LOW"
     assert payload["cited_clause_ids"] == ["C1"]
-    assert payload["cited_evidence_ids"] == ["EV-0"]
+    assert payload["cited_evidence_ids"] == ["E1"]
     assert payload["reasoning_digest"] == "nothing proves the claim"
 
 
