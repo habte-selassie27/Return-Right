@@ -1,5 +1,17 @@
-# GenLayer testing
+# ReturnRight tooling.
+#
+# Python 3.12 is required: genlayer-test and genlayer-py import
+# collections.abc.Buffer, which only exists from Python 3.12 on.
+#
+#   pip install -r requirements.txt
+#   npm install -g genlayer        # the CLI: networks, deploy, calls, receipts
+
+# Lints the contract and validates it against the GenVM SDK.
 genvm-linter
+
+# Test runner: `pytest tests/direct/` (in process, mocked) and
+# `gltest tests/integration/` (against a live network).
 genlayer-test
+
 pytest
 python-dotenv

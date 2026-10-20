@@ -1,0 +1,205 @@
+
+Result:
+{
+  ctor: { params: [], kwparams: {} },
+  methods: {
+    challenge_assessment: {
+      params: [ [ 'case_id', 'string' ], [ 'reason', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    close_response_window: {
+      params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    deprecate_policy: {
+      params: [ [ 'policy_id', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    escalate_case: {
+      params: [ [ 'case_id', 'string' ], [ 'reason', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    evaluate_case: {
+      params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    finalize_case: {
+      params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    get_assessment_history: {
+      params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: true,
+      ret: 'array'
+    },
+    get_case: {
+      params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: true,
+      ret: 'dict'
+    },
+    get_case_status: {
+      params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: true,
+      ret: 'string'
+    },
+    get_config: { params: [], kwparams: {}, readonly: true, ret: 'dict' },
+    get_evidence: {
+      params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: true,
+      ret: 'array'
+    },
+    get_order: {
+      params: [ [ 'order_id', 'string' ] ],
+      kwparams: {},
+      readonly: true,
+      ret: 'dict'
+    },
+    get_policy: {
+      params: [ [ 'policy_id', 'string' ] ],
+      kwparams: {},
+      readonly: true,
+      ret: 'dict'
+    },
+    get_policy_version: {
+      params: [ [ 'policy_id', 'string' ], [ 'version', 'int' ] ],
+      kwparams: {},
+      readonly: true,
+      ret: 'dict'
+    },
+    list_active_policies: {
+      params: [ [ 'merchant', 'string' ] ],
+      kwparams: {},
+      readonly: true,
+      ret: 'array'
+    },
+    open_case: {
+      params: [
+        [ 'order_id', 'string' ],
+        [ 'reason', 'string' ],
+        [ 'claim_text', 'string' ]
+      ],
+      kwparams: {},
+      readonly: false,
+      ret: 'string',
+      payable: false
+    },
+    re_evaluate: {
+      params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    record_order: {
+      params: [
+        [ 'policy_id', 'string' ],
+        [ 'policy_version', 'int' ],
+        [ 'buyer', 'string' ],
+        [ 'category_id', 'string' ],
+        [ 'price', 'int' ],
+        [ 'delivered_at', 'string' ],
+        [ 'listing_ref', 'string' ]
+      ],
+      kwparams: {},
+      readonly: false,
+      ret: 'string',
+      payable: false
+    },
+    register_policy: {
+      params: [
+        [ 'title', 'string' ],
+        [ 'return_window_seconds', 'int' ],
+        [ 'excluded_categories', 'array' ],
+        [ 'required_evidence_kinds', 'array' ],
+        [ 'max_restocking_bps', 'int' ],
+        [ 'clauses', 'array' ]
+      ],
+      kwparams: {},
+      readonly: false,
+      ret: 'string',
+      payable: false
+    },
+    request_seller_response: {
+      params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    set_config: {
+      params: [
+        [ 'seller_response_window_seconds', 'int' ],
+        [ 'challenge_window_seconds', 'int' ],
+        [ 'max_challenge_rounds', 'int' ],
+        [ 'max_evidence_per_side', 'int' ]
+      ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    set_escalation_role: {
+      params: [ [ 'escalation_role', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    submit_evidence: {
+      params: [
+        [ 'case_id', 'string' ],
+        [ 'kind', 'string' ],
+        [ 'ref', 'string' ]
+      ],
+      kwparams: {},
+      readonly: false,
+      ret: 'string',
+      payable: false
+    },
+    update_policy: {
+      params: [
+        [ 'policy_id', 'string' ],
+        [ 'title', 'string' ],
+        [ 'return_window_seconds', 'int' ],
+        [ 'excluded_categories', 'array' ],
+        [ 'required_evidence_kinds', 'array' ],
+        [ 'max_restocking_bps', 'int' ],
+        [ 'clauses', 'array' ]
+      ],
+      kwparams: {},
+      readonly: false,
+      ret: 'int',
+      payable: false
+    },
+    withdraw_case: {
+      params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    }
+  }
+}
+

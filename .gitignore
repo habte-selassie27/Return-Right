@@ -18,7 +18,7 @@ env/
 .DS_Store
 
 # GenLayer
-deployments/*.schema.json
+# The saved schema of a deployment is evidence and is kept on purpose.
 *.receipt.json
 *.trace.json
 
