@@ -1,5 +1,3 @@
-
-Result:
 {
   ctor: { params: [], kwparams: {} },
   methods: {
@@ -12,6 +10,13 @@ Result:
     },
     close_response_window: {
       params: [ [ 'case_id', 'string' ] ],
+      kwparams: {},
+      readonly: false,
+      ret: 'null',
+      payable: false
+    },
+    contest_order_record: {
+      params: [ [ 'case_id', 'string' ], [ 'fields', 'array' ] ],
       kwparams: {},
       readonly: false,
       ret: 'null',

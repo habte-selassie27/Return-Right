@@ -5,6 +5,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## 0.3.0 - 2026-10-20
+### Added
+- StudioNet deployment record for `0x45634C0723245E3D8524B71f56fa111318489Ce7`, including the
+  import url, the explorer link, the saved schema and the verification of every public method
+  against the live network with the real validator consensus
+
+### Fixed
+- `_to_address` accepts a native `Address`, a hex string and bytes. On the GenLayer network a
+  native address arrives as an `Address` object, so the deployed contract could not parse the
+  buyer of an order that was sent by the CLI (`EXPECTED: invalid address`)
+
 ## 0.2.0 - 2026-10-20
 ### Added
 - `contest_order_record`: the buyer may contest the merchant recorded delivery date and

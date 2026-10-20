@@ -335,11 +335,26 @@ def _addr_hex(address: Address) -> str:
     return "0x" + address.as_bytes.hex()
 
 
-def _to_address(value: str) -> Address:
+def _to_address(value) -> Address:
+    """Coerce a value into an Address.
+
+    On the GenLayer network a native address arrives as an Address object, on
+    the simulator it may arrive as a hex string and in tests as a bytes
+    object. All three are accepted.
+    """
+    if isinstance(value, Address):
+        return value
+    if isinstance(value, str):
+        try:
+            return Address(value)
+        except Exception:
+            pass
     try:
-        return Address(value)
+        return Address(bytes(value))
     except Exception:
-        _fail("EXPECTED: invalid address")
+        pass
+    _fail("EXPECTED: invalid address")
+    raise AssertionError("unreachable")  # keeps the return type happy
 
 
 def _epoch_seconds(iso: str) -> int:
@@ -1420,7 +1435,7 @@ class ReturnRight(gl.Contract):
         case.seller_responded = False
         case.pending_challenge_reason = ""
         case.escalation_reason = ""
-        case.escalated_by = _to_address("0x" + "00" * 20)
+        case.escalated_by = Address("0x" + "00" * 20)
 
         self.cases[case_id] = case
         self.case_by_order[order_id] = case_id
