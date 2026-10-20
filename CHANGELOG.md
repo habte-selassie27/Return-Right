@@ -43,7 +43,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - A consensus failure is reported as `TRANSIENT` and never as an `INCONCLUSIVE` verdict
 - Web facts are unverified claims (`source_trust`), and the extracted fact names changed to
   `delivery_claim`, `delivery_day_claim` and `page_kind_claim`
-- The StudioNet deployment of 0.1.0 predates these changes and has to be redeployed
+- The StudioNet deployment of 0.1.0 predates these changes; the current code is
+  deployed at `0x0d72fDA52A264a51D1Fe6F9c6fF3a7FA4E719853` (deploy tx
+  `0x323228c2f3c547e543682f3e0fe52100282e8ffc5d48128cbcad4beb5a57b771`), and the
+  deployed source is identical to `contracts/return_right.py`. The old 0.1.0
+  deployment `0x42BE8C04da3D6DC536113115F4D79D90562aBDa7` is superseded and
+  listed in `deployments/studionet.md`.
 
 ## 0.1.0 - 2026-10-20
 ### Added

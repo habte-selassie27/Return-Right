@@ -57,7 +57,14 @@ the threat model.
 
 ## Deployment
 
-See `deployments/studionet.md` and `deployments/testnet.md`.
+**StudioNet (gasless):** `0x0d72fDA52A264a51D1Fe6F9c6fF3a7FA4E719853`
+
+- Explorer: https://explorer-studio.genlayer.com/address/0x0d72fDA52A264a51D1Fe6F9c6fF3a7FA4E719853
+- Studio import: https://studio.genlayer.com/?import-contract=0x0d72fDA52A264a51D1Fe6F9c6fF3a7FA4E719853
+- Deploy tx: `0x323228c2f3c547e543682f3e0fe52100282e8ffc5d48128cbcad4beb5a57b771`
+
+The deployed source is identical to `contracts/return_right.py`. See
+`deployments/studionet.md` and `deployments/testnet.md` for the full records.
 
 ## Limitations
 
