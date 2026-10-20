@@ -30,16 +30,29 @@ DESIGN PRINCIPLE - DETERMINISTIC FIRST
 SYMMETRY
     The two sides are treated symmetrically: identical evidence caps, identical
     windows, identical challenge rights. Evidence reaches the model with neutral
-    labels (A/B) in a canonical order that depends neither on who submitted what
-    nor on the submission order, so a permutation of the evidence cannot change the
-    verdict. See docs/equivalence.md and tests/direct/test_symmetry.py.
+    labels (A/B) and with CONTENT DERIVED identifiers (E1, E2, ...) in a
+    canonical order that depends neither on who submitted what nor on the
+    submission order, so a permutation of the evidence cannot change the prompt,
+    let alone the verdict. The content derived ids are mapped back onto the
+    stored evidence records after consensus. See docs/equivalence.md and
+    tests/direct/test_symmetry.py.
+
+TRUST
+    The merchant records the orders, so the delivery date and the category are
+    merchant assertions. The buyer may contest them (contest_order_record); a
+    contested field is never silently turned into a hard failure, it becomes
+    CONTESTED and is settled by the validators.
 
 ERRORS
     All contract-raised errors use the documented prefixes EXPECTED, EXTERNAL,
     TRANSIENT and LLM_ERROR followed by a short stable reason (AGENTS.md s20).
+    A consensus failure (leader and validators did not agree) is reported as
+    TRANSIENT and never as an INCONCLUSIVE verdict: the two are different
+    things and must not be confused.
 """
 
 import datetime
+import hashlib
 import json
 import re
 
@@ -76,7 +89,18 @@ MAX_EVIDENCE_REF_LEN = 512
 MAX_REASONING_LEN = 280
 
 # Hard checks: a FAIL forces NOT_ELIGIBLE and the LLM is never called (s13 r2).
+# A CONTESTED hard check is not a failure: the buyer disputed the merchant
+# recorded input, so the validators decide instead of the code.
 HARD_CHECK_IDS = ("RETURN_WINDOW", "EXCLUDED_CATEGORY")
+
+# The only deterministic rules the code actually enforces. A clause may only be
+# declared DETERMINISTIC when it binds to one of these, so a merchant can never
+# label a clause deterministic and have it silently ignored (review P0 #5).
+DETERMINISTIC_RULES = ("RETURN_WINDOW", "EXCLUDED_CATEGORY", "REQUIRED_EVIDENCE")
+
+# Merchant recorded order fields the buyer may contest. The buyer's own claim
+# is never "merchant recorded", so it is always left to the validators.
+CONTESTABLE_FIELDS = ("DELIVERY_DATE", "CATEGORY")
 
 VERDICTS = ("ELIGIBLE_FULL", "ELIGIBLE_PARTIAL", "NOT_ELIGIBLE", "INCONCLUSIVE")
 CONFIDENCE_BANDS = ("LOW", "MEDIUM", "HIGH")
@@ -113,6 +137,10 @@ FEE_BUCKETS = (0, 250, 500, 1000, 2000, 4000, 8000)
 
 BAND_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 
+# Fact keys that are recorded for the audit trail but never compared between
+# the leader and the validators (a page may change between the two fetches).
+RECORD_ONLY_FACT_KEYS = ("content_digest",)
+
 # Accepted key aliases for the model output (documented in docs/equivalence.md).
 PAYLOAD_ALIASES = {
     "verdict": ("verdict", "decision", "outcome"),
@@ -133,13 +161,19 @@ PAYLOAD_ALIASES = {
 
 @allow_storage
 class PolicyClause:
-    """One clause of a policy. DETERMINISTIC clauses are decided by code,
-    INTERPRETIVE clauses are the only ones the validators are asked about."""
+    """One clause of a policy.
+
+    A DETERMINISTIVE clause is only accepted when it binds to one of the
+    DETERMINISTIC_RULES that the code really enforces, so a merchant can never
+    label a clause deterministic and have it silently ignored. An INTERPRETIVE
+    clause is the only kind the validators are asked about.
+    """
 
     clause_id: str
     text: str
     kind: str  # DETERMINISTIC | INTERPRETIVE
     topic: str  # WINDOW | CONDITION | DEFECT | CATEGORY | PROOF | FEE | OTHER
+    rule: str  # DETERMINISTIC only: the enforced rule id, "" for INTERPRETIVE
 
     def __init__(self) -> None:
         pass
@@ -217,7 +251,13 @@ class EvidenceItem:
 @allow_storage
 class Assessment:
     """An append-only assessment. `reasoning_digest` is stored for humans and is
-    explicitly NOT part of consensus."""
+    explicitly NOT part of consensus.
+
+    `fee_bps` is the restocking fee DEDUCTED from the refund, in basis points
+    of the order price. `net_refund_bps` is what the buyer would receive if the
+    merchant honours the assessment, also in basis points of the order price.
+    Both are informational: the contract never moves money.
+    """
 
     assessment_id: str
     case_id: str
@@ -226,6 +266,7 @@ class Assessment:
     confidence_band: str
     deterministic_results: DynArray[str]  # "CHECK_ID:RESULT"
     fee_bps: u32
+    net_refund_bps: u32
     cited_clause_ids: DynArray[str]
     cited_evidence_ids: DynArray[str]
     flags: DynArray[str]
@@ -240,7 +281,18 @@ class Assessment:
 @allow_storage
 class ReturnCase:
     """A return dispute: two-sided evidence, an append-only assessment history and
-    a strict lifecycle."""
+    a strict lifecycle.
+
+    TIMELINE (the exact sequence, see docs/design.md)
+        opened_at            the case is opened by the buyer
+        evidence_deadline_at the end of the evidence phase for both sides
+        seller_deadline_at   the end of the seller's response window
+        challenge_deadline_at the window in which an assessment can be challenged
+
+    The buyer may contest the merchant recorded fields (contested_fields). A
+    contested field never turns into a hard failure: the check becomes
+    CONTESTED and the validators decide.
+    """
 
     case_id: str
     order_id: str
@@ -251,7 +303,7 @@ class ReturnCase:
     status: str
     challenge_count: u32
     opened_at: str
-    evidence_deadline_at: str  # buyer evidence deadline
+    evidence_deadline_at: str  # evidence phase deadline, shared by both sides
     seller_deadline_at: str  # seller response window deadline
     challenge_deadline_at: str  # window in which the assessment can be challenged
     closed_at: str
@@ -259,6 +311,7 @@ class ReturnCase:
     pending_challenge_reason: str
     escalation_reason: str
     escalated_by: Address
+    contested_fields: DynArray[str]
     evidence: DynArray[EvidenceItem]
     assessments: DynArray[Assessment]
 
@@ -337,6 +390,111 @@ def _strip_json_noise(raw: str) -> str:
     if start == -1 or end == -1 or end <= start:
         return ""
     return text[start : end + 1]
+
+
+# ---------------------------------------------------------------------------
+# URL hygiene. Submitted URLs are fetched during evaluation, so they are
+# validated before they are ever stored (review: URL safety).
+# ---------------------------------------------------------------------------
+
+BLOCKED_HOSTS = (
+    "localhost",
+    "metadata",
+    "metadata.google.internal",
+    "instance-data",
+)
+
+BLOCKED_HOST_SUFFIXES = (".local", ".internal", ".localhost", ".home.arpa")
+
+
+def _is_private_host(host: str) -> bool:
+    """True for loopback, private, link-local and multicast IP literals."""
+    if host.startswith("[") and host.endswith("]"):
+        inner = host[1:-1]
+        if inner == "::1" or inner.startswith("fe80") or inner.startswith("fc"):
+            return True
+        if inner.startswith("fd"):
+            return True
+        return False
+    parts = host.split(".")
+    if len(parts) != 4:
+        return False
+    for part in parts:
+        if not part.isdigit():
+            return False
+        if int(part) > 255:
+            return False
+    first = int(parts[0])
+    second = int(parts[1])
+    if first == 0 or first == 10 or first == 127 or first >= 224:
+        return True
+    if first == 169 and second == 254:
+        return True
+    if first == 172 and 16 <= second <= 31:
+        return True
+    if first == 192 and second == 168:
+        return True
+    if first == 100 and 64 <= second <= 127:
+        return True
+    return False
+
+
+def validate_evidence_url(url: str) -> None:
+    """Reject a submitted evidence URL that is unsafe or malformed.
+
+    The contract fetches evidence URLs during evaluation. A submitted URL must
+    therefore use a plain http(s) scheme, must not carry credentials and must
+    not point at the host network or at a link-local metadata service. This is
+    the first line of defence; the runtime's own network policy is the second.
+    """
+    if len(url) == 0 or len(url) > MAX_EVIDENCE_REF_LEN:
+        _fail("EXPECTED: invalid evidence reference")
+    for char in url:
+        if ord(char) < 32 or ord(char) == 127:
+            _fail("EXPECTED: invalid evidence reference")
+    lowered = url.lower()
+    if not (lowered.startswith("https://") or lowered.startswith("http://")):
+        _fail("EXPECTED: invalid evidence reference")
+    rest = url.split("://", 1)[1]
+    authority = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    if authority == "" or "@" in authority:
+        _fail("EXPECTED: invalid evidence reference")
+    if authority.startswith("["):
+        close = authority.find("]")
+        if close == -1:
+            _fail("EXPECTED: invalid evidence reference")
+        host = authority[: close + 1].lower()
+    else:
+        host = authority.split(":")[0].lower()
+    host = host.strip(".")
+    if host == "":
+        _fail("EXPECTED: invalid evidence reference")
+    if host in BLOCKED_HOSTS or host.endswith(BLOCKED_HOST_SUFFIXES):
+        _fail("EXPECTED: invalid evidence reference")
+    if _is_private_host(host):
+        _fail("EXPECTED: invalid evidence reference")
+
+
+def normalize_page_text(text: str) -> str:
+    """Reduce a fetched page to a stable, comparable shape.
+
+    Digits are masked so that counters, prices and timestamps cannot make two
+    otherwise identical pages look different to the validators, and whitespace
+    is collapsed. The result is a shape, not the page: the contract never
+    stores or compares a raw document.
+    """
+    masked = re.sub(r"\d+", "#", text.lower())
+    return re.sub(r"\s+", " ", masked).strip()[:4096]
+
+
+def content_digest(text: str) -> str:
+    """A short fingerprint of the inspected page, recorded for the audit trail.
+
+    The fingerprint is deliberately NOT part of the consensus comparison: the
+    page may legitimately change between the leader's and the validator's
+    fetch, and the extracted claims are what the validators agree on.
+    """
+    return hashlib.sha256(normalize_page_text(text).encode("utf-8")).hexdigest()[:16]
 
 
 def _pick_key(payload: dict, canonical: str):
@@ -523,8 +681,11 @@ def payload_invariants_hold(
     # A hard deterministic failure can never be overturned by the model.
     if hard_failed and verdict != "NOT_ELIGIBLE":
         return False
-    # Missing required proof cannot produce a full refund.
-    if not required_evidence_ok and verdict == "ELIGIBLE_FULL":
+    # Missing proof cannot decide the case: the policy requirement was not met,
+    # which is not a finding against the buyer. The verdict stays open
+    # (INCONCLUSIVE) and the PROOF_REQUIREMENT_UNMET flag is recorded. A hard
+    # failure is stronger: the policy does not cover the request at all.
+    if not hard_failed and not required_evidence_ok and verdict != "INCONCLUSIVE":
         return False
     # A re-evaluation may not ignore evidence submitted after the last assessment.
     if new_evidence_ids:
@@ -534,13 +695,20 @@ def payload_invariants_hold(
 
 
 def facts_equivalent(leader, validator) -> bool:
-    """The equivalence rule of Call B: booleans/enums match exactly, dates match
-    at day granularity. Nothing free-form is ever compared."""
+    """The equivalence rule of Call B: the extracted claims must match exactly.
+
+    Nothing free-form is ever compared. The content fingerprint of the page is
+    recorded but NOT compared, because a page may legitimately change between
+    the leader's and the validator's fetch; the claims are what the validators
+    agree on.
+    """
     if not isinstance(leader, dict) or not isinstance(validator, dict):
         return False
     if set(leader.keys()) != set(validator.keys()):
         return False
     for key in leader.keys():
+        if key in RECORD_ONLY_FACT_KEYS:
+            continue
         left = leader[key]
         right = validator[key]
         if isinstance(left, dict) and isinstance(right, dict):
@@ -557,9 +725,19 @@ def facts_equivalent(leader, validator) -> bool:
 def extract_web_facts(kind: str, url: str) -> dict:
     """Extract a small fixed fact set from one evidence URL (Call B).
 
-    Only structured facts are extracted - never whole pages - so that the fact set
-    stays comparable between the leader and the validators. Photo URLs are only
-    checked for reachability: this contract does not claim to analyze images.
+    Only structured claims are extracted - never whole pages - so that the fact
+    set stays comparable between the leader and the validators.
+
+    Two honesty rules are built into this function:
+
+    1. The contract cannot authenticate a carrier or a merchant page, so every
+       extracted claim is marked UNVERIFIED. A claim is what a page says, not
+       proof that the claim is true.
+    2. Photo URLs are only checked for reachability. This contract does not
+       claim to analyze images.
+
+    An unreachable source yields {"reachable": "no"} and is flagged on the
+    assessment as EVIDENCE_UNAVAILABLE, which may lead to INCONCLUSIVE.
     """
     try:
         response = gl.nondet.web.get(url)
@@ -568,35 +746,54 @@ def extract_web_facts(kind: str, url: str) -> dict:
     if response is None or response.status != 200:
         return {"reachable": "no"}
     body = response.body or b""
-    text = body.decode("utf-8", errors="replace").lower()
-    facts = {"reachable": "yes"}
+    text = body.decode("utf-8", errors="replace")
+    facts = {
+        "reachable": "yes",
+        "source_trust": "UNVERIFIED",
+        "content_digest": content_digest(text),
+    }
     if kind == "TRACKING_URL":
-        if re.search(r"\bdelivered\b", text):
-            facts["delivered"] = "yes"
-        elif re.search(r"\bin transit\b|\bout for delivery\b|\bprocessing\b", text):
-            facts["delivered"] = "no"
+        if re.search(r"\bdelivered\b", text, re.IGNORECASE):
+            facts["delivery_claim"] = "delivered"
+        elif re.search(
+            r"\bin transit\b|\bout for delivery\b|\bprocessing\b", text, re.IGNORECASE
+        ):
+            facts["delivery_claim"] = "in_transit"
         else:
-            facts["delivered"] = "unknown"
+            facts["delivery_claim"] = "unknown"
         match = re.search(r"(\d{4}-\d{2}-\d{2})", text)
-        facts["delivery_day"] = match.group(1) if match else "unknown"
+        facts["delivery_day_claim"] = match.group(1) if match else "unknown"
     elif kind == "LISTING_URL":
-        if re.search(r"add to cart|add to basket|in stock|price", text):
-            facts["page_kind"] = "product"
+        if re.search(
+            r"add to cart|add to basket|in stock|price", text, re.IGNORECASE
+        ):
+            facts["page_kind_claim"] = "product"
         else:
-            facts["page_kind"] = "other"
+            facts["page_kind_claim"] = "other"
     else:
         # PHOTO_URL: reachability only, image content is not analyzed.
         facts["content"] = "not_analyzed"
     return facts
 
 
-def canonical_evidence_order(items):
-    """Return the evidence in the canonical, side-neutral order used for prompts.
+def canonical_evidence_entries(items):
+    """Return the canonical, side neutral evidence entries of a case.
 
-    The order is a pure function of the *multiset* of evidence items, so permuting
+    Each entry is (canonical_id, stored_id, label, kind, ref).
+
+    WHY THIS EXISTS
+        The stored evidence id ("EV-0", "EV-1", ...) is assigned in submission
+        order. Rendering that id in the prompt would leak the submission order
+        into the model input, and the documented symmetry guarantee ("a
+        permutation of the evidence produces a byte identical prompt") would be
+        false. So the prompt uses a CONTENT DERIVED id ("E1", "E2", ...) that
+        is a pure function of the evidence multiset, and the contract maps the
+        cited ids back onto the stored records after consensus.
+
+    The order is a pure function of the multiset of evidence items, so permuting
     the submission order (or swapping the two sides) produces a byte-identical
-    prompt. Sides are labelled A/B by a content derived digest, so the label
-    follows the evidence and not the role that submitted it.
+    prompt. The A/B labels are derived from a content digest, so a label follows
+    the evidence and not the role that submitted it.
     """
     by_side = {"BUYER": [], "SELLER": []}
     for item in items:
@@ -618,12 +815,25 @@ def canonical_evidence_order(items):
     for item in by_side.get("SELLER", []):
         groups[1 - buyer_slot].append(item)
 
-    rendered = []
+    entries = []
+    index = 0
     for slot in (0, 1):
         label = "A" if slot == 0 else "B"
         for item in sorted(groups[slot], key=lambda x: (x.kind, x.ref)):
-            rendered.append((item.evidence_id, label, item.kind, item.ref))
-    return rendered
+            index += 1
+            entries.append(("E%d" % index, item.evidence_id, label, item.kind, item.ref))
+    return entries
+
+
+def canonical_evidence_order(items):
+    """Return the evidence in the canonical, side-neutral order used for prompts.
+
+    Each entry is (canonical_id, label, kind, ref). The canonical id is derived
+    from the content of the evidence, never from the submission order, so a
+    permutation of the submissions cannot change the prompt.
+    """
+    entries = canonical_evidence_entries(items)
+    return [(entry[0], entry[2], entry[3], entry[4]) for entry in entries]
 
 
 # ---------------------------------------------------------------------------
@@ -722,6 +932,7 @@ class ReturnRight(gl.Contract):
                     "text": clause.text,
                     "kind": clause.kind,
                     "topic": clause.topic,
+                    "rule": clause.rule,
                 }
             )
         return {
@@ -812,6 +1023,7 @@ class ReturnRight(gl.Contract):
             "pending_challenge_reason": case.pending_challenge_reason,
             "escalation_reason": case.escalation_reason,
             "escalated_by": _addr_hex(case.escalated_by),
+            "contested_fields": list(case.contested_fields),
             "evidence_count": len(case.evidence),
             "assessment_count": len(case.assessments),
         }
@@ -861,6 +1073,7 @@ class ReturnRight(gl.Contract):
                     "confidence_band": item.confidence_band,
                     "deterministic_results": list(item.deterministic_results),
                     "fee_bps": item.fee_bps,
+                    "net_refund_bps": item.net_refund_bps,
                     "cited_clause_ids": list(item.cited_clause_ids),
                     "cited_evidence_ids": list(item.cited_evidence_ids),
                     "flags": list(item.flags),
@@ -938,6 +1151,11 @@ class ReturnRight(gl.Contract):
         the same policy id (see update_policy).
         """
         caller = gl.message.sender_address
+        merchant_key = _addr_hex(caller)
+        index = self.merchant_indexes.get(merchant_key)
+        if index is not None and len(index.policy_ids) >= MAX_POLICIES_PER_MERCHANT:
+            _fail("EXPECTED: too many policies for this merchant")
+
         policy_id = "POL-%d" % self.next_policy_id
         self.next_policy_id += 1
         policy = self._build_policy(
@@ -1127,11 +1345,56 @@ class ReturnRight(gl.Contract):
         return case_id
 
     @gl.public.write
+    def contest_order_record(self, case_id: str, fields: list) -> None:
+        """Contest the merchant recorded order data. Access: the buyer. (Write.)
+
+        The merchant records the delivery date and the category of an order, so
+        both are merchant assertions and not facts the contract can prove. The
+        buyer may therefore contest them.
+
+        A contested field is never silently turned into a hard failure: the
+        matching deterministic check becomes CONTESTED, the validators decide
+        the case on the evidence, and the assessment records the contestation.
+
+        `fields` may contain "DELIVERY_DATE" and/or "CATEGORY". The buyer's own
+        claim is never merchant recorded, so it is always left to the
+        validators.
+        """
+        caller = gl.message.sender_address
+        case = self._load_case(case_id)
+        if case.buyer != caller:
+            _fail("EXPECTED: caller is not the buyer")
+        if case.status not in ("OPEN", "AWAITING_SELLER", "READY"):
+            _fail("EXPECTED: invalid state transition")
+        if not isinstance(fields, list) or len(fields) == 0:
+            _fail("EXPECTED: invalid contested fields")
+        for field in fields:
+            if field not in CONTESTABLE_FIELDS:
+                _fail("EXPECTED: unknown contested field")
+            if field not in case.contested_fields:
+                case.contested_fields.append(field)
+
+    @gl.public.write
     def submit_evidence(self, case_id: str, kind: str, ref: str) -> str:
         """Add evidence to a case. The side is derived from the caller. (Write.)
 
         Only the two parties may submit evidence and each side is capped at the
         same number of items. Evidence is append-only and immutable.
+
+        THE EVIDENCE PHASE
+            Both sides share ONE absolute deadline, the `evidence_deadline_at`
+            of the case. It starts at `opened_at + window` and is moved to the
+            seller's response deadline when the seller is invited, so the
+            seller always gets a full window and the buyer is never cut off
+            before the seller has answered. Neither side can extend the
+            deadline by acting, which is what keeps the two sides symmetric.
+
+            The evidence phase ends when the response window is closed, so
+            neither side can slip in evidence after the other side answered.
+
+            After the first assessment the evidence is frozen, except inside
+            the challenge window: there both sides may still add the proof
+            that supports their challenge, with exactly the same rights.
         """
         caller = gl.message.sender_address
         case = self._load_case(case_id)
@@ -1139,27 +1402,45 @@ class ReturnRight(gl.Contract):
             _fail("EXPECTED: case is terminal")
         if kind not in EVIDENCE_KINDS:
             _fail("EXPECTED: unknown evidence kind")
-        if len(ref) == 0 or len(ref) > MAX_EVIDENCE_REF_LEN:
-            _fail("EXPECTED: invalid evidence reference")
-        if kind in URL_EVIDENCE_KINDS and not (
-            ref.startswith("https://") or ref.startswith("http://")
-        ):
+        if kind in URL_EVIDENCE_KINDS:
+            validate_evidence_url(ref)
+        elif len(ref) == 0 or len(ref) > MAX_EVIDENCE_REF_LEN:
             _fail("EXPECTED: invalid evidence reference")
 
         if caller == case.buyer:
             side = "BUYER"
-            if self._now_epoch() > _epoch_seconds(case.evidence_deadline_at):
-                _fail("EXPECTED: evidence window closed")
         elif caller == case.merchant:
             side = "SELLER"
-            if case.status != "AWAITING_SELLER":
+        else:
+            _fail("EXPECTED: caller is not a party to this case")
+
+        # The evidence phase ends with the response window, the challenge phase
+        # gives both sides the same right to add the proof of their challenge.
+        if case.status in ("EVALUATED", "RE_EVALUATED", "CHALLENGED"):
+            if case.challenge_deadline_at == "":
                 _fail("EXPECTED: invalid state transition")
+            if self._now_epoch() > _epoch_seconds(case.challenge_deadline_at):
+                _fail("EXPECTED: evidence window closed")
+        elif side == "SELLER":
+            # The seller may only answer inside its own response window.
+            if case.status == "OPEN":
+                _fail("EXPECTED: invalid state transition")
+            if case.status != "AWAITING_SELLER":
+                _fail("EXPECTED: response window closed")
             if case.seller_deadline_at == "":
                 _fail("EXPECTED: invalid state transition")
             if self._now_epoch() > _epoch_seconds(case.seller_deadline_at):
                 _fail("EXPECTED: response window closed")
         else:
-            _fail("EXPECTED: caller is not a party to this case")
+            # The buyer may add evidence while the case is open.
+            if case.status == "READY":
+                # The response window is over, so the evidence phase is over
+                # for both sides.
+                _fail("EXPECTED: evidence window closed")
+            if case.status not in ("OPEN", "AWAITING_SELLER"):
+                _fail("EXPECTED: invalid state transition")
+            if self._now_epoch() > _epoch_seconds(case.evidence_deadline_at):
+                _fail("EXPECTED: evidence window closed")
 
         count = 0
         for item in case.evidence:
@@ -1186,23 +1467,30 @@ class ReturnRight(gl.Contract):
 
     @gl.public.write
     def request_seller_response(self, case_id: str) -> None:
-        """Open the seller response window. Access: the buyer or the owner. (Write.)
+        """Open the seller response window. Access: anyone. (Write.)
 
-        The window length is the same for both sides. Once it is open the seller
-        may submit evidence until the deadline.
+        The window is permissionless on purpose: the evaluation requires the
+        response window to be closed, so nobody must be able to stall a case by
+        refusing to invite the seller. Opening the window cannot shorten it:
+        the seller always gets the full `seller_response_window_seconds` from
+        the moment of the invitation, and the shared evidence deadline moves
+        with it, so neither side is favoured.
         """
-        caller = gl.message.sender_address
         case = self._load_case(case_id)
         if case.status != "OPEN":
             _fail("EXPECTED: invalid state transition")
-        if caller != case.buyer and caller != self.owner:
-            _fail("EXPECTED: caller is not authorized")
 
         now = self._now_iso()
         case.status = "AWAITING_SELLER"
         case.seller_deadline_at = _shift_iso(
             now, int(self.seller_response_window_seconds)
         )
+        # The evidence phase now ends with the seller's window, so the buyer is
+        # never cut off before the seller answered.
+        if _epoch_seconds(case.seller_deadline_at) > _epoch_seconds(
+            case.evidence_deadline_at
+        ):
+            case.evidence_deadline_at = case.seller_deadline_at
 
     @gl.public.write
     def close_response_window(self, case_id: str) -> None:
@@ -1229,6 +1517,9 @@ class ReturnRight(gl.Contract):
     @gl.public.write
     def evaluate_case(self, case_id: str) -> None:
         """Assess a case against the pinned policy. Access: anyone. (Write.)
+
+        The seller response window must be closed first, so the other side
+        always had the chance to answer before a verdict is produced.
 
         Deterministic checks run first and are always recorded. A failed hard
         check (return window, excluded category) forces NOT_ELIGIBLE and the
@@ -1378,10 +1669,14 @@ class ReturnRight(gl.Contract):
         for category in excluded_categories:
             if not isinstance(category, str) or len(category) == 0:
                 _fail("EXPECTED: invalid excluded category")
+            if category in policy.excluded_categories:
+                _fail("EXPECTED: duplicate excluded category")
             policy.excluded_categories.append(category)
         for kind in required_evidence_kinds:
             if kind not in EVIDENCE_KINDS:
                 _fail("EXPECTED: unknown evidence kind")
+            if kind in policy.required_evidence_kinds:
+                _fail("EXPECTED: duplicate required evidence kind")
             policy.required_evidence_kinds.append(kind)
 
         for index in range(len(clauses)):
@@ -1392,10 +1687,16 @@ class ReturnRight(gl.Contract):
             text = clause.get("text", "")
             kind = clause.get("kind", "INTERPRETIVE")
             topic = clause.get("topic", "OTHER")
+            rule = clause.get("rule", "")
             if not isinstance(clause_id, str) or len(clause_id) == 0:
                 _fail("EXPECTED: invalid clause id")
             if len(clause_id) > 64:
                 _fail("EXPECTED: invalid clause id")
+            if ":" in clause_id:
+                _fail("EXPECTED: invalid clause id")
+            for existing in policy.clauses:
+                if existing.clause_id == clause_id:
+                    _fail("EXPECTED: duplicate clause id")
             if not isinstance(text, str) or len(text) == 0:
                 _fail("EXPECTED: invalid clause text")
             if len(text) > MAX_CLAUSE_TEXT_LEN:
@@ -1404,12 +1705,25 @@ class ReturnRight(gl.Contract):
                 _fail("EXPECTED: unknown clause kind")
             if topic not in CLAUSE_TOPICS:
                 _fail("EXPECTED: unknown clause topic")
+            if not isinstance(rule, str):
+                _fail("EXPECTED: invalid clause rule")
+            if kind == "DETERMINISTIC":
+                # Only the rules the code really enforces may be declared
+                # deterministic, so a clause is never silently ignored.
+                if rule not in DETERMINISTIC_RULES:
+                    _fail("EXPECTED: unsupported deterministic clause")
+            else:
+                # An interpretive clause is settled by the validators, so it
+                # must not claim a rule that the code would enforce.
+                if rule != "":
+                    _fail("EXPECTED: interpretive clause cannot declare a rule")
 
             stored = PolicyClause()
             stored.clause_id = clause_id
             stored.text = text
             stored.kind = kind
             stored.topic = topic
+            stored.rule = rule
             policy.clauses.append(stored)
 
         return policy
@@ -1439,31 +1753,54 @@ class ReturnRight(gl.Contract):
     def _deterministic_checks(self, case, order, policy) -> list:
         """Run every code-decidable check and record the result of each.
 
-        Returned entries are "CHECK_ID:RESULT" strings.
+        Returned entries are "CHECK_ID:RESULT" strings. A hard check can be
+        PASS, FAIL or CONTESTED: a CONTESTED check is one where the buyer
+        disputed the merchant recorded input, so the code must not decide it.
+
+        Every DETERMINISTIC clause of the policy gets its own record
+        ("CLAUSE:<id>:<rule>:<result>"), so the assessment shows exactly which
+        clause was enforced by which check and which clause was left to the
+        validators.
         """
         results = []
 
+        contested = []
+        for field in case.contested_fields:
+            contested.append(field)
+
         # C1 - is the request inside the return window? (hard)
-        elapsed = _epoch_seconds(case.opened_at) - _epoch_seconds(order.delivered_at)
-        if elapsed < 0 or elapsed > int(policy.return_window_seconds):
-            results.append("RETURN_WINDOW:FAIL")
+        if "DELIVERY_DATE" in contested:
+            results.append("RETURN_WINDOW:CONTESTED")
         else:
-            results.append("RETURN_WINDOW:PASS")
+            elapsed = _epoch_seconds(case.opened_at) - _epoch_seconds(
+                order.delivered_at
+            )
+            if elapsed < 0 or elapsed > int(policy.return_window_seconds):
+                results.append("RETURN_WINDOW:FAIL")
+            else:
+                results.append("RETURN_WINDOW:PASS")
 
         # C2 - is the product category excluded by the policy? (hard)
-        excluded = False
-        for category in policy.excluded_categories:
-            if category == order.category_id:
-                excluded = True
-        if excluded:
-            results.append("EXCLUDED_CATEGORY:FAIL")
+        if "CATEGORY" in contested:
+            results.append("EXCLUDED_CATEGORY:CONTESTED")
         else:
-            results.append("EXCLUDED_CATEGORY:PASS")
+            excluded = False
+            for category in policy.excluded_categories:
+                if category == order.category_id:
+                    excluded = True
+            if excluded:
+                results.append("EXCLUDED_CATEGORY:FAIL")
+            else:
+                results.append("EXCLUDED_CATEGORY:PASS")
 
         # C3 - are the required evidence kinds present?
+        # The required kinds are the merchant's requirements ON THE BUYER, so
+        # only the buyer's evidence can satisfy them. Otherwise the merchant
+        # could satisfy its own proof requirement with its own evidence.
         present = set()
         for item in case.evidence:
-            present.add(item.kind)
+            if item.side == "BUYER":
+                present.add(item.kind)
         missing = False
         for kind in policy.required_evidence_kinds:
             if kind not in present:
@@ -1472,6 +1809,14 @@ class ReturnRight(gl.Contract):
             results.append("REQUIRED_EVIDENCE:FAIL")
         else:
             results.append("REQUIRED_EVIDENCE:PASS")
+
+        # C4 - one record per deterministic clause of the policy.
+        for clause in policy.clauses:
+            if clause.kind == "DETERMINISTIC":
+                result = self._check_result(results, clause.rule)
+                results.append(
+                    "CLAUSE:%s:%s:%s" % (clause.clause_id, clause.rule, result)
+                )
 
         return results
 
@@ -1488,7 +1833,12 @@ class ReturnRight(gl.Contract):
     def _run_evaluation(self, case_id: str, produced_by: str) -> None:
         case = self._load_case(case_id)
         if produced_by == "EVALUATION":
-            if case.status not in ("OPEN", "READY"):
+            # The seller response window must be closed before a case may be
+            # assessed: nobody may be judged before the other side had the
+            # chance to answer.
+            if case.status in ("OPEN", "AWAITING_SELLER"):
+                _fail("EXPECTED: seller response window is not closed yet")
+            if case.status != "READY":
                 _fail("EXPECTED: invalid state transition")
         else:
             if case.status != "CHALLENGED":
@@ -1505,12 +1855,23 @@ class ReturnRight(gl.Contract):
             for entry in checks
             for check_id in HARD_CHECK_IDS
         )
+        hard_contested = any(
+            entry.startswith(check_id + ":CONTESTED")
+            for entry in checks
+            for check_id in HARD_CHECK_IDS
+        )
         required_ok = self._check_result(checks, "REQUIRED_EVIDENCE") == "PASS"
 
         flags = []
         if case.seller_deadline_at != "" and not case.seller_responded:
             # A silent seller does not lose the case; it is only recorded.
             flags.append("SELLER_NO_RESPONSE")
+        if not required_ok:
+            # The policy proof requirement was not met. That is a missing
+            # document, not a finding against the buyer.
+            flags.append("PROOF_REQUIREMENT_UNMET")
+        if hard_contested:
+            flags.append("ORDER_RECORD_CONTESTED")
 
         interpretive = False
         for clause in policy.clauses:
@@ -1528,6 +1889,17 @@ class ReturnRight(gl.Contract):
                 "reasoning_digest": "deterministic hard check failed",
             }
             flags.append("HARD_FAIL")
+        elif hard_contested and not interpretive:
+            # A contested merchant record cannot be decided by code and there is
+            # no interpretive clause to weigh, so the case stays open.
+            payload = {
+                "verdict": "INCONCLUSIVE",
+                "confidence_band": "LOW",
+                "fee_bps": 0,
+                "cited_clause_ids": [],
+                "cited_evidence_ids": [],
+                "reasoning_digest": "the order record is contested and the policy has no interpretive clause",
+            }
         elif not interpretive:
             # A fully deterministic policy is decided by code alone.
             if required_ok:
@@ -1540,13 +1912,15 @@ class ReturnRight(gl.Contract):
                     "reasoning_digest": "all deterministic checks passed",
                 }
             else:
+                # The proof the policy requires is missing, so the case cannot
+                # be decided on the merits. It stays open for escalation.
                 payload = {
-                    "verdict": "NOT_ELIGIBLE",
-                    "confidence_band": "HIGH",
+                    "verdict": "INCONCLUSIVE",
+                    "confidence_band": "LOW",
                     "fee_bps": 0,
                     "cited_clause_ids": [],
                     "cited_evidence_ids": [],
-                    "reasoning_digest": "required evidence is missing",
+                    "reasoning_digest": "required proof is missing, the case cannot be decided",
                 }
         else:
             facts = self._gather_web_facts(case)
@@ -1554,20 +1928,27 @@ class ReturnRight(gl.Contract):
                 if facts[evidence_id].get("reachable") == "no":
                     flags.append("EVIDENCE_UNAVAILABLE")
                     break
+            if facts:
+                # The contract cannot authenticate a carrier or a merchant page.
+                flags.append("EVIDENCE_UNVERIFIED")
             payload = self._interpret(case, policy, checks, facts, required_ok)
 
         # --- Validate the agreed result against the code side invariants ---
+        entries = canonical_evidence_entries(case.evidence)
         clause_ids = []
         for clause in policy.clauses:
             clause_ids.append(clause.clause_id)
-        evidence_ids = []
-        for item in case.evidence:
-            evidence_ids.append(item.evidence_id)
-        new_evidence_ids = self._new_evidence_ids(case)
+        canonical_ids = []
+        stored_by_canonical = {}
+        for canonical_id, stored_id, label, kind, ref in entries:
+            canonical_ids.append(canonical_id)
+            if canonical_id not in stored_by_canonical:
+                stored_by_canonical[canonical_id] = stored_id
+        new_evidence_ids = self._new_evidence_canonical_ids(case, entries)
         if not payload_invariants_hold(
             payload,
             clause_ids,
-            evidence_ids,
+            canonical_ids,
             int(policy.max_restocking_bps),
             required_ok,
             hard_failed,
@@ -1575,32 +1956,52 @@ class ReturnRight(gl.Contract):
         ):
             _fail("LLM_ERROR: verdict inconsistent with deterministic checks")
 
-        self._append_assessment(case, policy, produced_by, checks, payload, flags)
+        # The model cited content derived ids; map them back onto the stored
+        # evidence records for the audit trail.
+        mapped = []
+        for canonical_id in payload["cited_evidence_ids"]:
+            mapped.append(stored_by_canonical.get(canonical_id, canonical_id))
+        payload["cited_evidence_ids"] = mapped
 
-    def _new_evidence_ids(self, case) -> list:
-        """Evidence submitted after the previous assessment (used by re-evaluation)."""
+        self._append_assessment(case, produced_by, checks, payload, flags)
+
+    def _new_evidence_canonical_ids(self, case, entries) -> list:
+        """Evidence submitted after the previous assessment, in canonical ids.
+
+        Used by the re-evaluation invariant: a re-evaluation may not ignore the
+        evidence that triggered the challenge.
+        """
         if len(case.assessments) == 0:
             return []
         last = case.assessments[len(case.assessments) - 1]
-        out = []
+        new_stored = []
         index = 0
         for item in case.evidence:
             if index >= int(last.evidence_count):
-                out.append(item.evidence_id)
+                new_stored.append(item.evidence_id)
             index += 1
+        out = []
+        for canonical_id, stored_id, label, kind, ref in entries:
+            if stored_id in new_stored:
+                out.append(canonical_id)
         return out
 
     def _gather_web_facts(self, case) -> dict:
         """Call B: fetch linked evidence and extract a small fixed fact set.
 
         The leader and the validators fetch independently and compare the facts
-        with the coarse rule of docs/equivalence.md. Only structured facts are
+        with the coarse rule of docs/equivalence.md. Only structured claims are
         compared - never whole pages.
+
+        The facts are keyed by the CONTENT DERIVED evidence id, so the prompt
+        never shows an id that depends on the submission order.
         """
         targets = []
-        for item in case.evidence:
-            if item.kind in URL_EVIDENCE_KINDS:
-                targets.append((item.evidence_id, item.kind, item.ref))
+        for canonical_id, stored_id, label, kind, ref in canonical_evidence_entries(
+            case.evidence
+        ):
+            if kind in URL_EVIDENCE_KINDS:
+                targets.append((canonical_id, kind, ref))
         if not targets:
             return {}
 
@@ -1622,7 +2023,17 @@ class ReturnRight(gl.Contract):
                 return False
             return facts_equivalent(leader_facts, own)
 
-        return gl.vm.run_nondet(leader_fn, validator_fn)
+        try:
+            return gl.vm.run_nondet(leader_fn, validator_fn)
+        except gl.vm.UserError:
+            # A classified contract error of the leader is the same failure on
+            # every node, so it is propagated unchanged.
+            raise
+        except Exception:
+            # A disagreement between the leader and the validators is NOT a
+            # verdict. It is reported as retryable and no assessment is
+            # appended, so it can never be mistaken for an INCONCLUSIVE case.
+            _fail("TRANSIENT: validators did not reach agreement on the evidence facts")
 
     def _interpret(self, case, policy, checks, facts, required_ok) -> dict:
         """Call A: settle the residual INTERPRETIVE clauses by consensus.
@@ -1635,11 +2046,12 @@ class ReturnRight(gl.Contract):
         clause_ids = []
         for clause in policy.clauses:
             clause_ids.append(clause.clause_id)
+        entries = canonical_evidence_entries(case.evidence)
         evidence_ids = []
-        for item in case.evidence:
-            evidence_ids.append(item.evidence_id)
+        for canonical_id, stored_id, label, kind, ref in entries:
+            evidence_ids.append(canonical_id)
         max_fee = int(policy.max_restocking_bps)
-        new_evidence_ids = self._new_evidence_ids(case)
+        new_evidence_ids = self._new_evidence_canonical_ids(case, entries)
 
         def leader_fn() -> dict:
             raw = gl.nondet.exec_prompt(prompt)
@@ -1666,14 +2078,25 @@ class ReturnRight(gl.Contract):
                 return False
             return payloads_equivalent(leader_payload, own)
 
-        return gl.vm.run_nondet(leader_fn, validator_fn)
+        try:
+            return gl.vm.run_nondet(leader_fn, validator_fn)
+        except gl.vm.UserError:
+            # A classified contract error of the leader is the same failure on
+            # every node, so it is propagated unchanged.
+            raise
+        except Exception:
+            # A disagreement between the leader and the validators is NOT a
+            # verdict. It is reported as retryable and no assessment is
+            # appended, so it can never be mistaken for an INCONCLUSIVE case.
+            _fail("TRANSIENT: validators did not reach agreement on the policy interpretation")
 
     def _build_prompt(self, case, policy, checks, facts) -> str:
         """Build the model prompt.
 
-        Evidence is presented with neutral labels (A/B) in a canonical order that
-        does not depend on the submission order, and every item is wrapped as DATA
-        so that text inside the evidence can never act as an instruction.
+        Evidence is presented with neutral labels (A/B) and with CONTENT
+        DERIVED ids (E1, E2, ...) in a canonical order that does not depend on
+        the submission order, and every item is wrapped as DATA so that text
+        inside the evidence can never act as an instruction.
         """
         lines = []
         lines.append(
@@ -1695,19 +2118,60 @@ class ReturnRight(gl.Contract):
             % (policy.policy_id, policy.version, policy.title)
         )
         for clause in policy.clauses:
+            rule = ""
+            if clause.rule != "":
+                rule = ' rule="%s"' % clause.rule
             lines.append(
-                '  <clause id="%s" kind="%s" topic="%s">%s</clause>'
-                % (clause.clause_id, clause.kind, clause.topic, clause.text)
+                '  <clause id="%s" kind="%s" topic="%s"%s>%s</clause>'
+                % (clause.clause_id, clause.kind, clause.topic, rule, clause.text)
             )
         lines.append("</policy>")
         lines.append("")
 
         lines.append("<deterministic_results>")
         for entry in checks:
+            if entry.startswith("CLAUSE:"):
+                continue
             check_id, _, result = entry.partition(":")
             lines.append('  <check id="%s" result="%s"/>' % (check_id, result))
         lines.append("</deterministic_results>")
         lines.append("")
+
+        enforced = []
+        for entry in checks:
+            if not entry.startswith("CLAUSE:"):
+                continue
+            parts = entry.split(":")
+            if len(parts) == 4:
+                enforced.append((parts[1], parts[2], parts[3]))
+        if enforced:
+            lines.append("<enforced_clauses>")
+            for clause_id, rule, result in enforced:
+                lines.append(
+                    '  <clause_check id="%s" rule="%s" result="%s"/>'
+                    % (clause_id, rule, result)
+                )
+            lines.append("</enforced_clauses>")
+            lines.append(
+                "The clauses above are enforced by the code. The other clauses of "
+                "the policy are yours to weigh."
+            )
+            lines.append("")
+
+        contested = []
+        for field in case.contested_fields:
+            contested.append(field)
+        if contested:
+            lines.append("<contested_order_record>")
+            for field in contested:
+                lines.append("  <contested field=\"%s\"/>" % field)
+            lines.append("</contested_order_record>")
+            lines.append(
+                "The merchant recorded order data is disputed by the buyer for the "
+                "fields above. The corresponding check is CONTESTED, so the code "
+                "did not decide it. Weigh the evidence of both sides yourself."
+            )
+            lines.append("")
 
         if facts:
             lines.append("<evidence_facts>")
@@ -1718,6 +2182,11 @@ class ReturnRight(gl.Contract):
                 )
                 lines.append('  <facts id="%s" %s/>' % (evidence_id, attributes))
             lines.append("</evidence_facts>")
+            lines.append(
+                "The facts above are CLAIMS read from a web page. The contract "
+                "cannot authenticate the page, so treat every fact as unverified "
+                "and never as proof on its own."
+            )
             lines.append("")
 
         lines.append("<claim>")
@@ -1726,10 +2195,12 @@ class ReturnRight(gl.Contract):
         lines.append("")
 
         lines.append("<evidence>")
-        for evidence_id, label, kind, ref in canonical_evidence_order(case.evidence):
+        for canonical_id, stored_id, label, kind, ref in canonical_evidence_entries(
+            case.evidence
+        ):
             lines.append(
                 '  <evidence id="%s" kind="%s" side="%s">%s</evidence>'
-                % (evidence_id, kind, label, ref)
+                % (canonical_id, kind, label, ref)
             )
         lines.append("</evidence>")
         lines.append("")
@@ -1746,9 +2217,11 @@ class ReturnRight(gl.Contract):
             "- confidence_band must be exactly one of %s." % ", ".join(CONFIDENCE_BANDS)
         )
         lines.append(
-            "- fee_bps must be 0 unless the verdict is ELIGIBLE_PARTIAL; if the "
-            "verdict is ELIGIBLE_PARTIAL then fee_bps must be greater than 0 and "
-            "at most %d basis points." % int(policy.max_restocking_bps)
+            "- fee_bps is the restocking fee DEDUCTED from the refund, in basis "
+            "points of the order price. It must be 0 unless the verdict is "
+            "ELIGIBLE_PARTIAL; if the verdict is ELIGIBLE_PARTIAL then fee_bps "
+            "must be greater than 0 and at most %d basis points."
+            % int(policy.max_restocking_bps)
         )
         if int(policy.max_restocking_bps) == 0:
             lines.append(
@@ -1757,8 +2230,19 @@ class ReturnRight(gl.Contract):
             )
         if self._check_result(checks, "REQUIRED_EVIDENCE") == "FAIL":
             lines.append(
-                "- A required kind of evidence is missing, so the verdict must "
-                "not be ELIGIBLE_FULL."
+                "- A required kind of evidence is missing from the buyer's "
+                "evidence. The case then cannot be decided on the merits, so "
+                "the verdict must be INCONCLUSIVE."
+            )
+        if self._check_result(checks, "RETURN_WINDOW") == "CONTESTED":
+            lines.append(
+                "- The delivery date is contested, so decide on the evidence "
+                "whether the request is inside the return window."
+            )
+        if self._check_result(checks, "EXCLUDED_CATEGORY") == "CONTESTED":
+            lines.append(
+                "- The product category is contested, so decide on the evidence "
+                "whether the category is excluded by the policy."
             )
         lines.append(
             "- If the evidence is insufficient, or the two sides conflict and "
@@ -1785,9 +2269,7 @@ class ReturnRight(gl.Contract):
     # Internal: assessment bookkeeping
     # ------------------------------------------------------------------
 
-    def _append_assessment(
-        self, case, policy, produced_by, checks, payload, flags
-    ) -> None:
+    def _append_assessment(self, case, produced_by, checks, payload, flags) -> None:
         assessment_id = "AS-%d" % self.next_assessment_id
         self.next_assessment_id += 1
 
@@ -1800,6 +2282,14 @@ class ReturnRight(gl.Contract):
         for entry in checks:
             assessment.deterministic_results.append(entry)
         assessment.fee_bps = payload["fee_bps"]
+        # The net refund is informational: it says what the buyer would get if
+        # the merchant honoured the assessment. The contract moves no money.
+        if payload["verdict"] == "ELIGIBLE_FULL":
+            assessment.net_refund_bps = 10000
+        elif payload["verdict"] == "ELIGIBLE_PARTIAL":
+            assessment.net_refund_bps = 10000 - payload["fee_bps"]
+        else:
+            assessment.net_refund_bps = 0
         for clause_id in payload["cited_clause_ids"]:
             assessment.cited_clause_ids.append(clause_id)
         for evidence_id in payload["cited_evidence_ids"]:
