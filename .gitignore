@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# GenLayer
+deployments/*.schema.json
+*.receipt.json
+*.trace.json
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.junit.xml
